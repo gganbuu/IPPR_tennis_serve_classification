@@ -31,17 +31,24 @@ def process_image(image_path, output_path):
     outputs = run_inference(input_image)
     keypoints = outputs.numpy()[0, 0, :, :2]
 
-    # Draw keypoints with larger, more visible circles
+    # Define the indices for the keypoints we want to visualize
+    desired_keypoints_indices = [5, 6, 7, 11, 12, 13, 14]  # Shoulders, Hands, Elbows, Hips, Knees, Feet
+
+    # Draw only the desired keypoints
     height, width, _ = image.shape
-    for kp in keypoints:
+    filtered_keypoints = []
+    
+    for idx in desired_keypoints_indices:
+        kp = keypoints[idx]
         x, y = int(kp[1] * width), int(kp[0] * height)
         cv2.circle(image, (x, y), 5, (0, 255, 0), -1)  # Green circle
         cv2.circle(image, (x, y), 7, (0, 0, 0), 2)  # Black outline
+        filtered_keypoints.append(kp)
 
     # Save the output image
     cv2.imwrite(str(output_path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
 
-    return keypoints
+    return np.array(filtered_keypoints)
 
 def process_images_in_folder(folder_path, output_folder):
     # Create output folder if it doesn't exist
@@ -56,29 +63,15 @@ def process_images_in_folder(folder_path, output_folder):
     # Iterate through all jpg files in the folder
     for img_path in pbar:
         try:
-            # Read the image
-            image = cv2.imread(str(img_path))
-            if image is None:
-                raise ValueError(f"Unable to read image: {img_path}")
-            
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
             # Get the keypoints
             keypoints = process_image(img_path, output_folder / f"{img_path.stem}_pose.jpg")
 
-            # Visualize the results
-            for kp in keypoints:
-                cv2.circle(image, tuple(kp.astype(int)), 5, (0, 255, 0), -1)
-
-            # Save the output image
-            output_path = Path(output_folder) / f"{img_path.stem}_pose.jpg"
-            cv2.imwrite(str(output_path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+            # Save keypoint data for filtered keypoints
+            keypoint_file = output_folder / f"{img_path.stem}_keypoints.txt"
+            np.savetxt(str(keypoint_file), keypoints)
 
             # Update progress bar description
             pbar.set_postfix({'file': img_path.name, 'status': 'success'})
-            # Save keypoint data
-            keypoint_file = output_folder / f"{img_path.stem}_keypoints.txt"
-            np.savetxt(str(keypoint_file), keypoints)
         except Exception as e:
             print(f"\nError processing {img_path}: {str(e)}")
             pbar.set_postfix({'file': img_path.name, 'status': 'error'})
