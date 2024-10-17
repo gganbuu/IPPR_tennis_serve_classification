@@ -78,9 +78,9 @@ def process_images_in_folder(folder_path, output_folder):
 
 def main():
     # Define the paths to your dataset folders
-    dataset_root = Path('datasets') / 'tennis serve.v2i.coco(1)'/'Baddataset'
+    dataset_root = Path('datasets') / 'serveDataset'/'train'/'bad'
     # Define the folders for your dataset
-    folders = ['WA00', 'WA01', 'WA02','WA03','WA04']
+    folders = [f'train_bad_p{i}' for i in range(0, 3)]
 
     print(f"Dataset root: {dataset_root.absolute()}")
     if not dataset_root.exists():
