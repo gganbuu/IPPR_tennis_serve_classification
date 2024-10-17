@@ -5,7 +5,7 @@ from sklearn.metrics import accuracy_score
 import tensorflow as tf
 
 # Base path to your dataset
-base_path = 'datasets/tennis serve.v2i.coco(1)/'
+base_path = 'datasets/serveDataset'
 
 # Function to flatten and combine features
 def prepare_features(images, keypoints):
