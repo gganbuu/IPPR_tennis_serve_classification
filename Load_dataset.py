@@ -73,7 +73,6 @@ def load_datasets(base_path):
     images = np.array(class_0_images + class_1_images)
     labels = np.array(class_0_labels + class_1_labels)
     keypoints = np.array(class_0_keypoints + class_1_keypoints)
-
     return images, labels, keypoints
 
 # Load test datasets
@@ -82,7 +81,7 @@ def load_test_datasets(base_path):
     class_0_test_labels = []
     class_0_test_keypoints = []
 
-    for i in range(3, 5):  # Load WA03 and WA04 for class 0
+    for i in range(2, 5):  # Load WA03 and WA04 for class 0
         # Constructing the path for class 0 test images
         directory = os.path.join(base_path, 'Baddataset', f'WA0{i}_pose_output')  # Using the new base path
         class_0_test_images_temp, class_0_test_labels_temp = load_images_from_directory(directory, 0)
@@ -115,5 +114,4 @@ def load_test_datasets(base_path):
     test_images = np.array(class_0_test_images + class_1_test_images)
     test_labels = np.array(class_0_test_labels + class_1_test_labels)
     test_keypoints = np.array(class_0_test_keypoints + class_1_test_keypoints)
-
     return test_images, test_labels, test_keypoints
