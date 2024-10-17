@@ -78,9 +78,9 @@ def process_images_in_folder(folder_path, output_folder):
 
 def main():
     # Define the paths to your dataset folders
-    dataset_root = Path('datasets') / 'serveDataset'/'train'/'good'
+    dataset_root = Path('datasets') / 'serveDataset'
     # Define the folders for your dataset
-    folders = [f'train_good_p{i}' for i in range(0, 25)]
+    folders = [f'valid']
 
     print(f"Dataset root: {dataset_root.absolute()}")
     if not dataset_root.exists():
