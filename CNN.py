@@ -49,19 +49,12 @@ def rotate_image_and_keypoints(image, keypoints, angle):
 
     return rotated_image, rotated_keypoints
 
-def random_color_jitter():
-    brightness = torch.FloatTensor(1).uniform_(0.1, 0.6).item()
-    contrast = torch.FloatTensor(1).uniform_(0.1, 0.6).item()
-    saturation = torch.FloatTensor(1).uniform_(0.1, 0.6).item()
-    hue = torch.FloatTensor(1).uniform_(0, 0.2).item()
-    return transforms.ColorJitter(brightness, contrast, saturation, hue)
 
 def apply_transformations(image, keypoints):
     angle = torch.FloatTensor(1).uniform_(-30, 30).item()
     image, keypoints = rotate_image_and_keypoints(image, keypoints, angle)
 
     transform = transforms.Compose([
-        random_color_jitter(),
         transforms.ToPILImage(),
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
@@ -75,24 +68,27 @@ def prepare_dataset(images, labels, keypoints):
     label_list = []
 
     for img, kp, lab in zip(images, keypoints, labels):
-        # Convert image and keypoints to tensors with the correct shape
-        img_tensor, kp_tensor = apply_transformations(
-            torch.tensor(img).permute(2, 0, 1), 
-            torch.tensor(kp, dtype=torch.float32)
-        )
+        # Convert the original image and keypoints to tensors
+        original_img_tensor = torch.tensor(img).permute(2, 0, 1)
+        original_kp_tensor = torch.tensor(kp, dtype=torch.float32)
 
-        # Append the original tensors
-        image_tensors.append(img_tensor)
-        keypoint_tensors.append(kp_tensor)
+        # Append the original image and keypoints
+        image_tensors.append(original_img_tensor)
+        keypoint_tensors.append(original_kp_tensor)
         label_list.append(lab)  # Append the original label
-        
-        # If the label is 1, append the tensors and duplicate the label
-        if lab == 1:
-            image_tensors.append(img_tensor.clone())  # Clone to avoid overwriting
-            keypoint_tensors.append(kp_tensor.clone())
-            label_list.append(lab)  # Append the duplicated label
 
-    # Convert lists to tensors
+        # If the label is 1, also apply transformations and store them
+        if lab == 1:
+            for x in range(3):
+                transformed_img, transformed_kp = apply_transformations(
+                    original_img_tensor.clone(), original_kp_tensor.clone()
+                )
+                # Append the transformed image and keypoints
+                image_tensors.append(transformed_img)
+                keypoint_tensors.append(transformed_kp)
+                label_list.append(lab)  # Same label for the transformed version
+
+    # Convert lists to stacked tensors
     images_tensor = torch.stack(image_tensors)
     keypoints_tensor = torch.stack(keypoint_tensors)
     labels_tensor = torch.tensor(label_list, dtype=torch.float32)
@@ -114,12 +110,6 @@ train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
 test_dataset = TensorDataset(test_images_tensor, test_labels_tensor, test_keypoints_tensor)
 test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
 
-
-    #What have I tried
-    #RELU, Sigmoid, leakyrelu, changed learning rate and weight decay, more label 1 images, dropout, negative slope
-    #the images are too similar for a convolutional model to find a difference
-
-
 # Define the CNN model
 class ServeCNN(nn.Module):
     def __init__(self):
@@ -140,12 +130,13 @@ class ServeCNN(nn.Module):
         x = torch.cat((x, keypoints_flat), dim=1)  # Concatenate along the feature dimension
         
         x = self.dropout(F.leaky_relu(self.fc1(x), negative_slope=0.01))  # Fully connected layer with Leaky ReLU
-        x = torch.sigmoid(self.fc2(x))  # Output layer with sigmoid
-        return x
+        x = self.fc2(x)  # Output layer without activation (for BCEWithLogitsLoss)
+        return x  # No sigmoid applied here
 # Instantiate the model, loss function, and optimizer
 model = ServeCNN()
-criterion = nn.BCELoss()  # Binary Cross-Entropy Loss
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-3)
+class_weights = torch.tensor([1.0, (191 / 200)]).float()
+criterion = nn.BCEWithLogitsLoss(pos_weight=class_weights[1])  # Binary Cross-Entropy Loss
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-6)
 
 # Training function
 def train(model, loader, optimizer, criterion, n_epochs=1, patience=5):
@@ -163,10 +154,7 @@ def train(model, loader, optimizer, criterion, n_epochs=1, patience=5):
             total = 0
 
             for batch in loader:  # Iterate over the loader
-                if len(batch) == 2:  # Check if batch has two elements
-                    images, labels = batch  # Unpack images and labels
-                else:
-                    images, labels, keypoints = batch  # Unpack all three elements
+                images, labels, keypoints = batch  # Unpack all three elements
 
                 # Forward pass
                 outputs = model(images, keypoints).squeeze(1)  # Ensure correct shape for BCE loss
@@ -179,7 +167,7 @@ def train(model, loader, optimizer, criterion, n_epochs=1, patience=5):
 
                 # Accumulate loss and accuracy
                 total_loss += loss.item()
-                preds = (outputs >= 0.5).float()  # Convert sigmoid output to binary predictions
+                preds = (outputs >= 0.05).float()  # Convert sigmoid output to binary predictions
                 correct += (preds == labels).sum().item()
                 total += labels.size(0)
 
@@ -217,38 +205,33 @@ def test(model, loader, criterion):
     total_loss = 0.0
     correct = 0
     total = 0
-    all_labels = []
-    all_preds = []
+    predictions = []
 
     with torch.no_grad():
-        for batch in loader:
-            if len(batch) == 2:  # Check if batch has two elements
-                images, labels = batch  # Unpack images and labels
-            else:
-                images, labels, keypoints = batch  # Unpack all three elements
-
-            outputs = model(images, keypoints).squeeze(1)  # Ensure correct shape for BCE loss
+        for images, labels, keypoints in loader:
+            outputs = model(images, keypoints).squeeze(1)
             loss = criterion(outputs, labels.float())
 
             total_loss += loss.item()
-            for output, label in zip(outputs, labels):
-                print(f"Raw output: {output.item():.10f}, True label: {label.item():}")
-            preds = (outputs >= 0.01).float()  # Convert sigmoid output to binary predictions
+            preds = (outputs >= 0.5).float()
+            predictions.extend(preds.numpy())
             correct += (preds == labels).sum().item()
             total += labels.size(0)
 
-            all_labels.extend(labels.cpu().numpy())
-            all_preds.extend(preds.cpu().numpy())
-
-    average_loss = total_loss / len(loader)
+    avg_loss = total_loss / len(loader)
     accuracy = correct / total
-    print(f"Test Loss: {average_loss:.4f}, Accuracy: {accuracy:.4f}")
+    return avg_loss, accuracy, predictions
 
-    # Generate a classification report
-    print(classification_report(all_labels, all_preds))
+# Train the model
+model, losses_bits = train(model, train_loader, optimizer, criterion, n_epochs=2, patience=5)
 
-# Training the model
-model, training_losses = train(model, train_loader, optimizer, criterion, n_epochs=1, patience=5)
+# Test the model
+test_loss, test_accuracy, test_predictions = test(model, test_loader, criterion)
 
-# Testing the model
-test(model, test_loader, criterion)
+print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
+
+# Generate classification report
+test_labels_np = test_labels_tensor.numpy()
+print(classification_report(test_labels_np, test_predictions))
+
+
