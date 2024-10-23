@@ -20,12 +20,23 @@ base_path = 'datasets/serveDataset/'
 images, labels, keypoints = load_datasets(base_path)
 test_images, test_labels, test_keypoints = load_test_datasets(base_path)
 
-# Rotate image and keypoints
 def rotate_image_and_keypoints(image, keypoints, angle):
+    """
+    Rotate both the image and the corresponding keypoints by the given angle.
+
+    Args:
+        image (Tensor): Image tensor to rotate.
+        keypoints (Tensor): Tensor of shape (n, 2) containing (x, y) coordinates of keypoints.
+        angle (float): Angle to rotate (in degrees).
+
+    Returns:
+        rotated_image (Tensor): The rotated image tensor.
+        rotated_keypoints (Tensor): The transformed keypoints tensor.
+    """
     rotated_image = TF.rotate(image, angle)
     theta = math.radians(angle)
-    Cx, Cy = image.shape[2] / 2, image.shape[1] / 2
 
+    Cx, Cy = image.shape[2] / 2, image.shape[1] / 2
     rotation_matrix = torch.tensor([
         [math.cos(theta), -math.sin(theta)],
         [math.sin(theta), math.cos(theta)]
@@ -37,21 +48,12 @@ def rotate_image_and_keypoints(image, keypoints, angle):
 
     return rotated_image, rotated_keypoints
 
-# Random color jitter
-def random_color_jitter():
-    brightness = torch.FloatTensor(1).uniform_(0.1, 0.6).item()
-    contrast = torch.FloatTensor(1).uniform_(0.1, 0.6).item()
-    saturation = torch.FloatTensor(1).uniform_(0.1, 0.6).item()
-    hue = torch.FloatTensor(1).uniform_(0, 0.2).item()
-    return transforms.ColorJitter(brightness, contrast, saturation, hue)
 
-# Apply transformations
 def apply_transformations(image, keypoints):
     angle = torch.FloatTensor(1).uniform_(-30, 30).item()
     image, keypoints = rotate_image_and_keypoints(image, keypoints, angle)
 
     transform = transforms.Compose([
-        random_color_jitter(),
         transforms.ToPILImage(),
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
@@ -59,28 +61,41 @@ def apply_transformations(image, keypoints):
     ])
     return transform(image), keypoints
 
-# Prepare dataset with transformations
+# Prepare the datasets with transformations
 def prepare_dataset(images, labels, keypoints):
-    image_tensors, keypoint_tensors, label_list = [], [], []
+    image_tensors, keypoint_tensors = [], []
+    label_list = []
 
     for img, kp, lab in zip(images, keypoints, labels):
-        img_tensor, kp_tensor = apply_transformations(
-            torch.tensor(img).permute(2, 0, 1), 
-            torch.tensor(kp, dtype=torch.float32)
-        )
-        image_tensors.append(img_tensor)
-        keypoint_tensors.append(kp_tensor)
-        label_list.append(lab)
+        # Convert the original image and keypoints to tensors
+        original_img_tensor = torch.tensor(img).permute(2, 0, 1)
+        original_kp_tensor = torch.tensor(kp, dtype=torch.float32)
 
-        # Duplicate data if label is 1
+        # Append the original image and keypoints
+        image_tensors.append(original_img_tensor)
+        keypoint_tensors.append(original_kp_tensor)
+        label_list.append(lab)  # Append the original label
+
+        # If the label is 1, also apply transformations and store them
         if lab == 1:
-            image_tensors.append(img_tensor.clone())
-            keypoint_tensors.append(kp_tensor.clone())
-            label_list.append(lab)
+            for x in range(3):
+                transformed_img, transformed_kp = apply_transformations(
+                    original_img_tensor.clone(), original_kp_tensor.clone()
+                )
+                # Append the transformed image and keypoints
+                image_tensors.append(transformed_img)
+                keypoint_tensors.append(transformed_kp)
+                label_list.append(lab)  # Same label for the transformed version
 
+    # Convert lists to stacked tensors
     images_tensor = torch.stack(image_tensors)
     keypoints_tensor = torch.stack(keypoint_tensors)
     labels_tensor = torch.tensor(label_list, dtype=torch.float32)
+
+    # Print shapes for debugging
+    print(f"Images shape: {images_tensor.shape}")
+    print(f"Labels shape: {labels_tensor.shape}")
+    print(f"Keypoints shape: {keypoints_tensor.shape}")
 
     return images_tensor, labels_tensor, keypoints_tensor
 

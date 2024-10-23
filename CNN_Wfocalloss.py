@@ -39,6 +39,7 @@ class FocalLoss(nn.Module):
         else:
             return focal_loss
 
+
 def rotate_image_and_keypoints(image, keypoints, angle):
     rotated_image = TF.rotate(image, angle)
     theta = math.radians(angle)
@@ -67,26 +68,39 @@ def apply_transformations(image, keypoints):
     ])
     return transform(image), keypoints
 
+
 def prepare_dataset(images, labels, keypoints):
-    image_tensors, keypoint_tensors, label_list = [], [], []
+    image_tensors, keypoint_tensors, label_list = []
 
     for img, kp, lab in zip(images, keypoints, labels):
-        img_tensor, kp_tensor = apply_transformations(
-            torch.tensor(img).permute(2, 0, 1), 
-            torch.tensor(kp, dtype=torch.float32)
-        )
+        # Convert the image and keypoints to tensors
+        img_tensor = torch.tensor(img).permute(2, 0, 1)
+        kp_tensor = torch.tensor(kp, dtype=torch.float32)
+
+        # Apply transformation and store original as well as transformed samples
         image_tensors.append(img_tensor)
         keypoint_tensors.append(kp_tensor)
         label_list.append(lab)
-        
 
-    return torch.stack(image_tensors), torch.tensor(label_list, dtype=torch.float32), torch.stack(keypoint_tensors)
+        if lab == 1:  # Apply transformations if label is 1
+            for _ in range(3):
+                transformed_img, transformed_kp = apply_transformations(img_tensor.clone(), kp_tensor.clone())
+                image_tensors.append(transformed_img)
+                keypoint_tensors.append(transformed_kp)
+                label_list.append(lab)
 
-# Prepare datasets and DataLoaders
+    images_tensor = torch.stack(image_tensors)
+    keypoints_tensor = torch.stack(keypoint_tensors)
+    labels_tensor = torch.tensor(label_list, dtype=torch.float32)
+
+    return images_tensor, labels_tensor, keypoints_tensor
+
+
+# Prepare the training and test datasets
 train_images_tensor, train_labels_tensor, train_keypoints_tensor = prepare_dataset(images, labels, keypoints)
 test_images_tensor, test_labels_tensor, test_keypoints_tensor = prepare_dataset(test_images, test_labels, test_keypoints)
 
-
+# Create DataLoaders
 train_dataset = TensorDataset(train_images_tensor, train_labels_tensor, train_keypoints_tensor)
 train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
 
