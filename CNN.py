@@ -40,6 +40,7 @@ print(f"Original Test Class 1 count: {original_test_class_counts[1]}")
 train_class_counts = count_classes(labels)
 print(f"Original train Class 0 count: {train_class_counts[0]}")
 print(f"Original train Class 1 count: {train_class_counts[1]}")
+
 # Define the rotate_image_and_keypoints and apply_transformations functions
 def rotate_image_and_keypoints(image, keypoints, angle):
     rotated_image = TF.rotate(image, angle)
@@ -66,7 +67,7 @@ def apply_transformations(image, keypoints):
     return transform(image), keypoints
 
 # Prepare the datasets with transformations
-def prepare_dataset(images, labels, keypoints,check):
+def prepare_dataset(images, labels, keypoints, check):
     image_tensors, keypoint_tensors = [], []
     label_list = []
 
@@ -78,7 +79,7 @@ def prepare_dataset(images, labels, keypoints,check):
         label_list.append(lab)
 
         # If the label is 1, also apply transformations and store them
-        if check == True:
+        if check:
             if lab == 1:
                 for _ in range(3):  # Apply transformations 3 times
                     transformed_img, transformed_kp = apply_transformations(original_img_tensor.clone(), original_kp_tensor.clone())
@@ -87,12 +88,11 @@ def prepare_dataset(images, labels, keypoints,check):
                     label_list.append(lab)
         else:
             if lab == 0:
-                 for _ in range(1):  # Apply transformations 2 times
+                for _ in range(1):  # Apply transformations 2 times
                     transformed_img, transformed_kp = apply_transformations(original_img_tensor.clone(), original_kp_tensor.clone())
                     image_tensors.append(transformed_img)
                     keypoint_tensors.append(transformed_kp)
                     label_list.append(lab)
-
 
     images_tensor = torch.stack(image_tensors)
     keypoints_tensor = torch.stack(keypoint_tensors)
@@ -109,7 +109,7 @@ def prepare_dataset(images, labels, keypoints,check):
 
 # Prepare the dataset with transformations applied
 train_images_tensor, train_labels_tensor, train_keypoints_tensor = prepare_dataset(images, labels, keypoints, check=False)
-test_images_tensor, test_labels_tensor, test_keypoints_tensor = prepare_dataset(test_images, test_labels, test_keypoints,check=True)
+test_images_tensor, test_labels_tensor, test_keypoints_tensor = prepare_dataset(test_images, test_labels, test_keypoints, check=True)
 
 # Create DataLoaders
 train_dataset = TensorDataset(train_images_tensor, train_labels_tensor, train_keypoints_tensor)
@@ -138,18 +138,17 @@ class ServeCNN(nn.Module):
         x = torch.cat((x, keypoints_flat), dim=1)  # Concatenate along the feature dimension
         
         x = self.dropout(F.leaky_relu(self.fc1(x), negative_slope=0.01))  # Fully connected layer with Leaky ReLU
-        x = self.fc2(x)  # Output layer without activation (for BCEWithLogitsLoss)
-        return x  # No sigmoid applied here
+        x = self.fc2(x)  
+        return x  
+
 # Instantiate the model, loss function, and optimizer
 model = ServeCNN()
 class_weights = torch.tensor([1.0, (191 / 200)]).float()
 criterion = nn.BCEWithLogitsLoss(pos_weight=class_weights[1])  # Binary Cross-Entropy Loss
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-6)
 
-# Train and test functions remain the same as before
-
 # Generate classification report and confusion matrix, then save them to a JSON file
-def save_results_to_json(test_labels, test_predictions, output_path="classification_results.json"):
+def save_results_to_json(test_labels, test_predictions, train_accuracy, train_loss, test_accuracy, test_loss, output_path="classification_results.json"):
     # Convert test labels and predictions to NumPy arrays
     test_labels_np = test_labels.numpy()
     test_predictions_np = np.array(test_predictions)
@@ -161,103 +160,68 @@ def save_results_to_json(test_labels, test_predictions, output_path="classificat
     # Create a dictionary to store the results
     results = {
         "classification_report": class_report,
-        "confusion_matrix": conf_matrix
+        "confusion_matrix": conf_matrix,
+        "training_accuracy": train_accuracy,
+        "training_loss": train_loss,
+        "test_accuracy": test_accuracy,
+        "test_loss": test_loss
     }
 
     # Save to JSON
     with open(output_path, "w") as f:
         json.dump(results, f, indent=4)
 
-def train(model, loader, optimizer, criterion, n_epochs=1, patience=5):
-    best_accuracy = 0.0
-    best_loss = float('inf')
-    epochs_without_improvement = 0
-    best_model = None
-    losses_bits = []  # Track losses
-
+def train(model, loader, optimizer, criterion, epochs=1):
     model.train()
-    with tqdm(total=n_epochs, unit="epoch") as pbar:
-        for epoch in range(n_epochs):
-            total_loss = 0.0
-            correct = 0
-            total = 0
+    for epoch in range(epochs):
+        total_loss = 0
+        correct = 0
+        total = 0
 
-            for batch in loader:  # Iterate over the loader
-                images, labels, keypoints = batch  # Unpack all three elements
+        for images, labels, keypoints in tqdm(loader):
+            optimizer.zero_grad()
+            outputs = model(images, keypoints).squeeze()
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
 
-                # Forward pass
-                outputs = model(images, keypoints).squeeze(1)  # Ensure correct shape for BCE loss
-                loss = criterion(outputs, labels.float())
+            total_loss += loss.item()
+            predictions = torch.sigmoid(outputs) > 0.5  # Convert to binary predictions
+            correct += (predictions == labels).sum().item()
+            total += labels.size(0)
 
-                # Backward pass and optimization
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+        avg_loss = total_loss / len(loader)
+        avg_accuracy = correct / total
+        print(f"Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.4f}, Accuracy: {avg_accuracy:.4f}")
 
-                # Accumulate loss and accuracy
-                total_loss += loss.item()
-                preds = (outputs >= 0.05).float()  # Convert sigmoid output to binary predictions
-                correct += (preds == labels).sum().item()
-                total += labels.size(0)
+    return avg_accuracy, avg_loss
 
-            epoch_loss = total_loss / len(loader)
-            epoch_accuracy = correct / total
-            losses_bits.append(epoch_loss)
-
-            # Update tqdm description
-            pbar.set_description(f"Epoch {epoch + 1} - Accuracy: {epoch_accuracy:.4f} - Loss: {epoch_loss:.4f}")
-            pbar.update(1)
-
-            # Check for improvements
-            if epoch_loss < best_loss:
-                best_loss = epoch_loss
-                epochs_without_improvement = 0
-                best_model = model.state_dict().copy()
-            else:
-                epochs_without_improvement += 1
-
-            if epochs_without_improvement >= patience:
-                print("Early stopping triggered.")
-                break
-
-            if epoch_accuracy > best_accuracy:
-                best_accuracy = epoch_accuracy
-                best_model = model.state_dict().copy()
-
-    print(f"Best training accuracy: {best_accuracy:.4f}")
-    model.load_state_dict(best_model)  # Load the best model state
-    return model, losses_bits
-
-# Testing function
 def test(model, loader, criterion):
     model.eval()
-    total_loss = 0.0
+    total_loss = 0
     correct = 0
     total = 0
-    predictions = []
+    predictions_list = []
 
     with torch.no_grad():
         for images, labels, keypoints in loader:
-            outputs = model(images, keypoints).squeeze(1)
-            loss = criterion(outputs, labels.float())
-
+            outputs = model(images, keypoints).squeeze()
+            loss = criterion(outputs, labels)
             total_loss += loss.item()
-            preds = (outputs >= 0.5).float()
-            predictions.extend(preds.numpy())
-            correct += (preds == labels).sum().item()
+            predictions = torch.sigmoid(outputs) > 0.5  # Convert to binary predictions
+            predictions_list.extend(predictions.cpu().numpy())
+            correct += (predictions == labels).sum().item()
             total += labels.size(0)
 
     avg_loss = total_loss / len(loader)
-    accuracy = correct / total
-    return avg_loss, accuracy, predictions
+    avg_accuracy = correct / total
+    return avg_accuracy, avg_loss, predictions_list
 
 # Train the model
-model, losses_bits = train(model, train_loader, optimizer, criterion, n_epochs=2, patience=5)
+train_accuracy, train_loss = train(model, train_loader, optimizer, criterion, epochs=5)
 
 # Test the model
-test_loss, test_accuracy, test_predictions = test(model, test_loader, criterion)
+test_accuracy, test_loss, predictions = test(model, test_loader, criterion)
 
-print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
-
-# Save the classification report and confusion matrix to a JSON file
-save_results_to_json(test_labels_tensor, test_predictions)
+# Save the results
+save_results_to_json(test_labels_tensor, predictions, train_accuracy, train_loss, test_accuracy, test_loss)
