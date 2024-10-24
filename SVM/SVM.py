@@ -2,6 +2,10 @@ import os
 import cv2
 import numpy as np
 
+from sklearn import svm
+from sklearn.metrics import f1_score, accuracy_score
+
+
 def extract_sift_features(data_dir):
     features = []
     labels = []
@@ -15,7 +19,6 @@ def extract_sift_features(data_dir):
             if file.endswith(".jpg"):
                 # Load image using OpenCV
                 img_path = os.path.join(subdir, file)
-                print(img_path)
                 image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)  # Load in grayscale
                 
                 # Resize image to a fixed size (e.g., 128x128) to ensure uniformity
@@ -43,5 +46,29 @@ def extract_sift_features(data_dir):
     # Convert to numpy arrays
     return np.array(features), np.array(labels)
 
-extract_sift_features("/Users/rajkulkarni/Documents/UTS 2024/SPRING/Image Recognition/Project Code/IPPR_tennis_serve_classification/datasets/serveDataset/train")
-# print(extract_sift_features("/Users/rajkulkarni/Documents/UTS 2024/SPRING/Image Recognition/Project Code/IPPR_tennis_serve_classification/datasets/serveDataset/train"))
+# Paths to your datasets
+train_dir = "/Users/rajkulkarni/Documents/UTS 2024/SPRING/Image Recognition/Project Code/IPPR_tennis_serve_classification/datasets/serveDataset/train"
+test_dir = "/Users/rajkulkarni/Documents/UTS 2024/SPRING/Image Recognition/Project Code/IPPR_tennis_serve_classification/datasets/serveDataset/test"
+valid_dir = "/Users/rajkulkarni/Documents/UTS 2024/SPRING/Image Recognition/Project Code/IPPR_tennis_serve_classification/datasets/serveDataset/valid"
+
+# Extract SIFT features for each set
+X_train, y_train = extract_sift_features(train_dir)
+X_test, y_test = extract_sift_features(test_dir)
+X_valid, y_valid = extract_sift_features(valid_dir)
+
+# Train SVM on training data
+model = svm.SVC(kernel='linear')
+model.fit(X_train, y_train)
+
+# Evaluate on validation data
+y_pred = model.predict(X_valid)
+f1_val = f1_score(y_valid, y_pred)
+print(f"Validation Accuracy: {accuracy_score(y_valid, y_pred)}")
+print(f"Validation F1 Score: {f1_val}")
+
+# Test the trained model
+y_test_pred = model.predict(X_test)
+f1_test = f1_score(y_test, y_test_pred)
+print(f"Test Accuracy: {accuracy_score(y_test, y_test_pred)}")
+print(f"Test F1 Score: {f1_test}")
+# print(extract_sift_features(valid_dir))
