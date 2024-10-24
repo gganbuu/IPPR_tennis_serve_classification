@@ -8,8 +8,9 @@ from torch.utils.data import DataLoader, TensorDataset
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.utils import class_weight
+import json  # For saving the classification report and confusion matrix
 
 # Load datasets (assuming these functions are defined in Load_dataset.py)
 from Load_dataset import load_datasets, load_test_datasets
@@ -21,39 +22,41 @@ base_path = 'datasets/serveDataset/'  # Set the correct path
 images, labels, keypoints = load_datasets(base_path)
 test_images, test_labels, test_keypoints = load_test_datasets(base_path)
 
+print(f"test Images shape: {np.array(test_images).shape}")
+print(f"test Labels shape: {np.array(test_labels).shape}")
+print(f"Original test Keypoints shape: {np.array(test_keypoints).shape}")
+
+# Count classes
+def count_classes(labels):
+    class_counts = {0: 0, 1: 0}
+    for lab in labels:
+        class_counts[lab] += 1
+    return class_counts
+
+# Count and print the number of images for each class in the original test dataset
+original_test_class_counts = count_classes(test_labels)
+print(f"Original Test Class 0 count: {original_test_class_counts[0]}")
+print(f"Original Test Class 1 count: {original_test_class_counts[1]}")
+train_class_counts = count_classes(labels)
+print(f"Original train Class 0 count: {train_class_counts[0]}")
+print(f"Original train Class 1 count: {train_class_counts[1]}")
+# Define the rotate_image_and_keypoints and apply_transformations functions
 def rotate_image_and_keypoints(image, keypoints, angle):
-    """
-    Rotate both the image and the corresponding keypoints by the given angle.
-
-    Args:
-        image (Tensor): Image tensor to rotate.
-        keypoints (Tensor): Tensor of shape (n, 2) containing (x, y) coordinates of keypoints.
-        angle (float): Angle to rotate (in degrees).
-
-    Returns:
-        rotated_image (Tensor): The rotated image tensor.
-        rotated_keypoints (Tensor): The transformed keypoints tensor.
-    """
     rotated_image = TF.rotate(image, angle)
     theta = math.radians(angle)
-
     Cx, Cy = image.shape[2] / 2, image.shape[1] / 2
     rotation_matrix = torch.tensor([
         [math.cos(theta), -math.sin(theta)],
         [math.sin(theta), math.cos(theta)]
     ])
-
     shifted_keypoints = keypoints - torch.tensor([Cx, Cy])
     rotated_keypoints = (rotation_matrix @ shifted_keypoints.T).T
     rotated_keypoints += torch.tensor([Cx, Cy])
-
     return rotated_image, rotated_keypoints
-
 
 def apply_transformations(image, keypoints):
     angle = torch.FloatTensor(1).uniform_(-30, 30).item()
     image, keypoints = rotate_image_and_keypoints(image, keypoints, angle)
-
     transform = transforms.Compose([
         transforms.ToPILImage(),
         transforms.Resize((224, 224)),
@@ -63,45 +66,50 @@ def apply_transformations(image, keypoints):
     return transform(image), keypoints
 
 # Prepare the datasets with transformations
-def prepare_dataset(images, labels, keypoints):
+def prepare_dataset(images, labels, keypoints,check):
     image_tensors, keypoint_tensors = [], []
     label_list = []
 
     for img, kp, lab in zip(images, keypoints, labels):
-        # Convert the original image and keypoints to tensors
         original_img_tensor = torch.tensor(img).permute(2, 0, 1)
         original_kp_tensor = torch.tensor(kp, dtype=torch.float32)
-
-        # Append the original image and keypoints
         image_tensors.append(original_img_tensor)
         keypoint_tensors.append(original_kp_tensor)
-        label_list.append(lab)  # Append the original label
+        label_list.append(lab)
 
         # If the label is 1, also apply transformations and store them
-        if lab == 1:
-            for x in range(3):
-                transformed_img, transformed_kp = apply_transformations(
-                    original_img_tensor.clone(), original_kp_tensor.clone()
-                )
-                # Append the transformed image and keypoints
-                image_tensors.append(transformed_img)
-                keypoint_tensors.append(transformed_kp)
-                label_list.append(lab)  # Same label for the transformed version
+        if check == True:
+            if lab == 1:
+                for _ in range(3):  # Apply transformations 3 times
+                    transformed_img, transformed_kp = apply_transformations(original_img_tensor.clone(), original_kp_tensor.clone())
+                    image_tensors.append(transformed_img)
+                    keypoint_tensors.append(transformed_kp)
+                    label_list.append(lab)
+        else:
+            if lab == 0:
+                 for _ in range(1):  # Apply transformations 2 times
+                    transformed_img, transformed_kp = apply_transformations(original_img_tensor.clone(), original_kp_tensor.clone())
+                    image_tensors.append(transformed_img)
+                    keypoint_tensors.append(transformed_kp)
+                    label_list.append(lab)
 
-    # Convert lists to stacked tensors
+
     images_tensor = torch.stack(image_tensors)
     keypoints_tensor = torch.stack(keypoint_tensors)
     labels_tensor = torch.tensor(label_list, dtype=torch.float32)
-
-    # Print shapes for debugging
-    print(f"Images shape: {images_tensor.shape}")
-    print(f"Labels shape: {labels_tensor.shape}")
-    print(f"Keypoints shape: {keypoints_tensor.shape}")
+    test_class_count = count_classes(label_list)
+    print(f"New Test Class 0 count: {test_class_count[0]}")
+    print(f"New Test Class 1 count: {test_class_count[1]}")
+    # Print shapes after transformations
+    print(f"Images shape after augmentations: {images_tensor.shape}")
+    print(f"Labels shape after augmentations: {labels_tensor.shape}")
+    print(f"Keypoints shape after augmentations: {keypoints_tensor.shape}")
 
     return images_tensor, labels_tensor, keypoints_tensor
 
-train_images_tensor, train_labels_tensor, train_keypoints_tensor = prepare_dataset(images, labels, keypoints)
-test_images_tensor, test_labels_tensor, test_keypoints_tensor = prepare_dataset(test_images, test_labels, test_keypoints)
+# Prepare the dataset with transformations applied
+train_images_tensor, train_labels_tensor, train_keypoints_tensor = prepare_dataset(images, labels, keypoints, check=False)
+test_images_tensor, test_labels_tensor, test_keypoints_tensor = prepare_dataset(test_images, test_labels, test_keypoints,check=True)
 
 # Create DataLoaders
 train_dataset = TensorDataset(train_images_tensor, train_labels_tensor, train_keypoints_tensor)
@@ -138,7 +146,28 @@ class_weights = torch.tensor([1.0, (191 / 200)]).float()
 criterion = nn.BCEWithLogitsLoss(pos_weight=class_weights[1])  # Binary Cross-Entropy Loss
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-6)
 
-# Training function
+# Train and test functions remain the same as before
+
+# Generate classification report and confusion matrix, then save them to a JSON file
+def save_results_to_json(test_labels, test_predictions, output_path="classification_results.json"):
+    # Convert test labels and predictions to NumPy arrays
+    test_labels_np = test_labels.numpy()
+    test_predictions_np = np.array(test_predictions)
+
+    # Classification report and confusion matrix
+    class_report = classification_report(test_labels_np, test_predictions_np, output_dict=True, zero_division=1)
+    conf_matrix = confusion_matrix(test_labels_np, test_predictions_np).tolist()
+
+    # Create a dictionary to store the results
+    results = {
+        "classification_report": class_report,
+        "confusion_matrix": conf_matrix
+    }
+
+    # Save to JSON
+    with open(output_path, "w") as f:
+        json.dump(results, f, indent=4)
+
 def train(model, loader, optimizer, criterion, n_epochs=1, patience=5):
     best_accuracy = 0.0
     best_loss = float('inf')
@@ -230,8 +259,5 @@ test_loss, test_accuracy, test_predictions = test(model, test_loader, criterion)
 
 print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
 
-# Generate classification report
-test_labels_np = test_labels_tensor.numpy()
-print(classification_report(test_labels_np, test_predictions))
-
-
+# Save the classification report and confusion matrix to a JSON file
+save_results_to_json(test_labels_tensor, test_predictions)
