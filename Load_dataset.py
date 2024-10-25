@@ -59,9 +59,9 @@ def load_datasets(base_path):
                 normalised_keypoints = normalise_keypoints(keypoints, 224, 224)  # Assuming 224x224 image size
                 class_0_keypoints.append(normalised_keypoints)
 
-    for i in range(1, 24):
+    for i in range(1, 25):
         directory = os.path.join(base_path, 'train/good', f'train_good_p{i}_pose_output')
-        images_temp, labels_temp = load_images_from_directory(directory, 0)
+        images_temp, labels_temp = load_images_from_directory(directory, 1)
         class_1_images.extend(images_temp)
         class_1_labels.extend(labels_temp)
 
