@@ -9,7 +9,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 from sklearn.metrics import classification_report, confusion_matrix
-from sklearn.utils import class_weight
 import json  # For saving the classification report and confusion matrix
 
 # Load datasets (assuming these functions are defined in Load_dataset.py)
@@ -96,7 +95,7 @@ def prepare_dataset(images, labels, keypoints, check):
 
     images_tensor = torch.stack(image_tensors)
     keypoints_tensor = torch.stack(keypoint_tensors)
-    labels_tensor = torch.tensor(label_list, dtype=torch.float32)
+    labels_tensor = torch.tensor(label_list, dtype=torch.long)  # CrossEntropyLoss expects integer labels
     test_class_count = count_classes(label_list)
     print(f"New Test Class 0 count: {test_class_count[0]}")
     print(f"New Test Class 1 count: {test_class_count[1]}")
@@ -126,29 +125,27 @@ class ServeCNN(nn.Module):
         self.pool = nn.MaxPool2d(2, 2)  # Pooling layer
         self.bn1 = nn.BatchNorm2d(16)  # Batch normalization for conv1
         self.fc1 = nn.Linear(16 * 112 * 112 + 14, 64)  # Adjusted for concatenation with 14 keypoint dimensions
-        self.fc2 = nn.Linear(64, 1)  # Output layer
+        self.fc2 = nn.Linear(64, 2)  # Output layer
         self.dropout = nn.Dropout(p=0.5)  # Reduced dropout rate
 
     def forward(self, x, keypoints):
-        x = self.pool(F.leaky_relu(self.bn1(self.conv1(x)), negative_slope=0.01))  # Convolution + Leaky ReLU + Pooling
+        x = self.pool(F.relu(self.bn1(self.conv1(x))))  # Convolution + ReLU + Pooling
         x = x.view(-1, 16 * 112 * 112)  # Flattening the tensor; this will be (N, 200704)
 
         # Flatten the keypoints and concatenate with the flattened features
         keypoints_flat = keypoints.view(keypoints.size(0), -1)  # Flatten keypoints to (N, 14)
         x = torch.cat((x, keypoints_flat), dim=1)  # Concatenate along the feature dimension
         
-        x = self.dropout(F.leaky_relu(self.fc1(x), negative_slope=0.01))  # Fully connected layer with Leaky ReLU
+        x = self.dropout(F.relu(self.fc1(x)))  # Fully connected layer with ReLU
         x = self.fc2(x)  
         return x  
-
 # Instantiate the model, loss function, and optimizer
 model = ServeCNN()
-class_weights = torch.tensor([1.0, (191 / 200)]).float()
-criterion = nn.BCEWithLogitsLoss(pos_weight=class_weights[1])  # Binary Cross-Entropy Loss
+criterion = nn.CrossEntropyLoss()  # For multi-class classification
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-6)
 
 # Generate classification report and confusion matrix, then save them to a JSON file
-def save_results_to_json(test_labels, test_predictions, train_accuracy, train_loss, test_accuracy, test_loss, output_path="classification_results.json"):
+def save_results_to_json(test_labels, test_predictions, train_accuracy, train_loss, test_accuracy, test_loss, output_path="CrossEntropyLoss_results_SGD_lr=0.0001.json"):
     # Convert test labels and predictions to NumPy arrays
     test_labels_np = test_labels.numpy()
     test_predictions_np = np.array(test_predictions)
@@ -164,7 +161,8 @@ def save_results_to_json(test_labels, test_predictions, train_accuracy, train_lo
         "training_accuracy": train_accuracy,
         "training_loss": train_loss,
         "test_accuracy": test_accuracy,
-        "test_loss": test_loss
+        "test_loss": test_loss,
+        "training_stats": training_stats
     }
 
     # Save to JSON
@@ -173,6 +171,12 @@ def save_results_to_json(test_labels, test_predictions, train_accuracy, train_lo
 
 def train(model, loader, optimizer, criterion, epochs=1):
     model.train()
+    training_stats = {
+        "epochs": [],
+        "losses": [],
+        "accuracies": []
+    }
+    
     for epoch in range(epochs):
         total_loss = 0
         correct = 0
@@ -180,21 +184,29 @@ def train(model, loader, optimizer, criterion, epochs=1):
 
         for images, labels, keypoints in tqdm(loader):
             optimizer.zero_grad()
-            outputs = model(images, keypoints).squeeze()
+            outputs = model(images, keypoints)
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item()
-            predictions = torch.sigmoid(outputs) > 0.5  # Convert to binary predictions
+            predictions = outputs.argmax(dim=1)  # Argmax for classification
             correct += (predictions == labels).sum().item()
             total += labels.size(0)
 
+        # Calculate average loss and accuracy for the epoch
         avg_loss = total_loss / len(loader)
         avg_accuracy = correct / total
+        
+        # Append the stats for the epoch
+        training_stats["epochs"].append(epoch + 1)
+        training_stats["losses"].append(avg_loss)
+        training_stats["accuracies"].append(avg_accuracy)
+
         print(f"Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.4f}, Accuracy: {avg_accuracy:.4f}")
 
-    return avg_accuracy, avg_loss
+    return avg_accuracy, avg_loss, training_stats
+
 
 def test(model, loader, criterion):
     model.eval()
@@ -205,10 +217,10 @@ def test(model, loader, criterion):
 
     with torch.no_grad():
         for images, labels, keypoints in loader:
-            outputs = model(images, keypoints).squeeze()
+            outputs = model(images, keypoints)
             loss = criterion(outputs, labels)
             total_loss += loss.item()
-            predictions = torch.sigmoid(outputs) > 0.5  # Convert to binary predictions
+            predictions = outputs.argmax(dim=1)
             predictions_list.extend(predictions.cpu().numpy())
             correct += (predictions == labels).sum().item()
             total += labels.size(0)
@@ -217,11 +229,9 @@ def test(model, loader, criterion):
     avg_accuracy = correct / total
     return avg_accuracy, avg_loss, predictions_list
 
-# Train the model
-train_accuracy, train_loss = train(model, train_loader, optimizer, criterion, epochs=5)
+# Training and testing the model
+train_accuracy, train_loss, training_stats = train(model, train_loader, optimizer, criterion, epochs=5)
+test_accuracy, test_loss, test_predictions = test(model, test_loader, criterion)
 
-# Test the model
-test_accuracy, test_loss, predictions = test(model, test_loader, criterion)
-
-# Save the results
-save_results_to_json(test_labels_tensor, predictions, train_accuracy, train_loss, test_accuracy, test_loss)
+# Save results to JSON
+save_results_to_json(test_labels_tensor, test_predictions, train_accuracy, train_loss, test_accuracy, test_loss)
