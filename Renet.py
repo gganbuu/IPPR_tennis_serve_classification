@@ -57,17 +57,17 @@ def prepare_dataset(images, labels, keypoints, check):
         keypoint_tensors.append(original_kp_tensor)
         label_list.append(lab)
 
-        # If the label is 1, also apply transformations and store them
+        # Apply augmentations for certain labels (1 or 0 depending on the 'check' flag)
         if check:
             if lab == 1:
-                for _ in range(3):  # Apply transformations 3 times
+                for _ in range(3):  # Apply transformations 3 times for label 1
                     transformed_img, transformed_kp = apply_transformations(original_img_tensor.clone(), original_kp_tensor.clone())
                     image_tensors.append(transformed_img)
                     keypoint_tensors.append(transformed_kp)
                     label_list.append(lab)
         else:
             if lab == 0:
-                for _ in range(1):  # Apply transformations 1 time
+                for _ in range(1):  # Apply transformations 1 time for label 0
                     transformed_img, transformed_kp = apply_transformations(original_img_tensor.clone(), original_kp_tensor.clone())
                     image_tensors.append(transformed_img)
                     keypoint_tensors.append(transformed_kp)
@@ -77,7 +77,7 @@ def prepare_dataset(images, labels, keypoints, check):
     keypoints_tensor = torch.stack(keypoint_tensors)
     labels_tensor = torch.tensor(label_list, dtype=torch.float32)
     
-    # Print shapes after transformations
+    # Debug: Print shapes after transformations
     print(f"Images shape after augmentations: {images_tensor.shape}")
     print(f"Labels shape after augmentations: {labels_tensor.shape}")
     print(f"Keypoints shape after augmentations: {keypoints_tensor.shape}")
@@ -99,29 +99,51 @@ test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
 class ServeResNet(nn.Module):
     def __init__(self):
         super(ServeResNet, self).__init__()
-        self.resnet = models.resnet18(pretrained=True)  # Load pre-trained ResNet18
+        self.resnet = models.resnet18(pretrained=True)
+        
         # Modify the input layer to accept 3-channel images (if necessary)
         self.resnet.conv1 = nn.Conv2d(3, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
-        # Modify the final fully connected layer
-        self.resnet.fc = nn.Linear(self.resnet.fc.in_features, 64)  # Change output features to 64
-        self.fc2 = nn.Linear(64 + 14, 1)  # Output layer for combined features (64 + 14 for keypoints)
-        self.dropout = nn.Dropout(p=0.5)  # Dropout layer
+        self.resnet.fc = nn.Identity()  # Remove final fully connected layer
+
+        # Custom fully connected layers
+        self.fc1 = nn.Linear(512, 256)
+        self.bn1 = nn.BatchNorm1d(256)  # Add BatchNorm layer
+        self.fc2 = nn.Linear(256 + 14, 1)  # Combine ResNet output with keypoints
+        
+        self.dropout1 = nn.Dropout(p=0.5)
+        self.dropout2 = nn.Dropout(p=0.3)
+        
+        # Initialize weights for custom layers
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
     def forward(self, x, keypoints):
-        x = self.resnet(x)  # Forward through ResNet
-        keypoints_flat = keypoints.view(keypoints.size(0), -1)  # Flatten keypoints to (N, 14)
-        x = torch.cat((x, keypoints_flat), dim=1)  # Concatenate ResNet features with keypoints
-        x = self.dropout(F.leaky_relu(self.fc2(x), negative_slope=0.01))  # Fully connected layer with dropout
-        return x  # No sigmoid applied here
+        x = self.resnet(x)
+        keypoints_flat = keypoints.view(keypoints.size(0), -1)
+
+        x = F.gelu(self.fc1(x))
+        x = self.bn1(x)
+        x = self.dropout1(x)
+        x = torch.cat((x, keypoints_flat), dim=1)
+        x = self.dropout2(x)
+        x = self.fc2(x)
+        return x
+
 
 # Instantiate the model, loss function, and optimizer
 model = ServeResNet()
-class_weights = torch.tensor([1.0, (191 / 200)]).float()
+class_weights = torch.tensor([1.0, (191 / 200)]).float()  # Adjust weights if needed
 criterion = nn.BCEWithLogitsLoss(pos_weight=class_weights[1])  # Binary Cross-Entropy Loss
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-6)
 
-# Generate classification report and confusion matrix, then save them to a JSON file
-def save_results_to_json(test_labels, test_predictions, training_stats, output_path="classification_results_Renet.json"):
+# Save results to JSON
+def save_results_to_json(test_labels, test_predictions, training_stats, output_path="classification_results_ResNet_leakyRELU.json"):
     class_report = classification_report(test_labels, test_predictions, output_dict=True, zero_division=1)
     conf_matrix = confusion_matrix(test_labels, test_predictions).tolist()
 
@@ -134,12 +156,10 @@ def save_results_to_json(test_labels, test_predictions, training_stats, output_p
     with open(output_path, "w") as f:
         json.dump(results, f, indent=4)
 
+# Train the model
 def train(model, loader, optimizer, criterion, n_epochs=1, patience=5):
-    best_accuracy = 0.0
     best_loss = float('inf')
-    epochs_without_improvement = 0
     best_model = None
-    losses_bits = []  # Track losses
     training_stats = {
         "epochs": [],
         "losses": [],
@@ -173,7 +193,6 @@ def train(model, loader, optimizer, criterion, n_epochs=1, patience=5):
 
             epoch_loss = total_loss / len(loader)
             epoch_accuracy = correct / total
-            losses_bits.append(epoch_loss)
 
             # Store training stats
             training_stats["epochs"].append(epoch + 1)
@@ -187,50 +206,40 @@ def train(model, loader, optimizer, criterion, n_epochs=1, patience=5):
             # Check for improvements
             if epoch_loss < best_loss:
                 best_loss = epoch_loss
-                epochs_without_improvement = 0
-                best_model = model.state_dict()  # Save the model state
-            else:
-                epochs_without_improvement += 1
+                best_model = model.state_dict()  # Save the best model state
 
-            if epochs_without_improvement >= patience:
-                print("Early stopping triggered")
-                break
-
-    # Load best model state
+    # Load the best model state
     if best_model is not None:
         model.load_state_dict(best_model)
 
-    return model, losses_bits, training_stats
-
-# Train the model
-model, losses_bits, training_stats = train(model, train_loader, optimizer, criterion, n_epochs=2)
+    return model, training_stats
 
 # Evaluate the model on the test dataset
 def evaluate(model, loader):
     model.eval()
     total_correct = 0
     total = 0
-    all_predictions = []
     all_labels = []
-
+    all_predictions = []
+    
     with torch.no_grad():
-        for batch in loader:
-            images, labels, keypoints = batch
+        for images, labels, keypoints in loader:
             outputs = model(images, keypoints).squeeze(1)
-            preds = (outputs >= 0.05).float()  # Convert sigmoid output to binary predictions
+            preds = (outputs >= 0.05).float()  # Apply threshold for binary predictions
             total_correct += (preds == labels).sum().item()
             total += labels.size(0)
-            all_predictions.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
+
+            all_labels.extend(labels.tolist())
+            all_predictions.extend(preds.tolist())
 
     accuracy = total_correct / total
-    return accuracy, all_labels, all_predictions
+    return all_labels, all_predictions, accuracy
 
-# Get accuracy and predictions on the test set
-accuracy, test_labels, test_predictions = evaluate(model, test_loader)
+# Train the model
+trained_model, training_stats = train(model, train_loader, optimizer, criterion, n_epochs=10)
 
-# Save results to JSON
+# Evaluate the model
+test_labels, test_predictions, test_accuracy = evaluate(trained_model, test_loader)
+
+# Save the classification report and confusion matrix
 save_results_to_json(test_labels, test_predictions, training_stats)
-
-# Print the final accuracy
-print(f"Test Accuracy: {accuracy:.4f}")
