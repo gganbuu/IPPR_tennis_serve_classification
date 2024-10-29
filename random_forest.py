@@ -1,92 +1,126 @@
 import os
 import numpy as np
+import cv2
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import cross_val_score
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
-import tensorflow as tf
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
 
-# Base path to your dataset
-base_path = 'datasets/serveDataset'
+#Set the directory - Adjust accordingly
+train_good_dir = '/Users/jiheenoh/Desktop/Tennis_serve/Train_good'
+train_bad_dir = '/Users/jiheenoh/Desktop/Tennis_serve/Train_bad'
 
-# Function to flatten and combine features
-def prepare_features(images, keypoints):
-    flattened_images = [img.numpy().flatten() for img in images]
-    flattened_images = np.array(flattened_images)
-    flattened_keypoints = keypoints.reshape(keypoints.shape[0], -1)
-    features = np.hstack((flattened_images, flattened_keypoints))
-    return features
-
-# Load images and keypoints from a directory
-def load_images_and_keypoints(directory, label):
+# Define augmentation
+def load_images_from_folder(folder, label, augment=False):
     images = []
     labels = []
-    keypoints = []
-    for filename in os.listdir(directory):
-        if filename.endswith('.jpg') or filename.endswith('.png'):
-            img_path = os.path.join(directory, filename)
-            img = load_and_preprocess_image(img_path)
-            images.append(img)
-            labels.append(label)
-        elif filename.endswith('.txt'):
-            keypoints_path = os.path.join(directory, filename)
-            kp = load_keypoints_from_file(keypoints_path)
-            normalised_keypoints = normalise_keypoints(kp, 224, 224)
-            keypoints.append(normalised_keypoints)
-    return images, labels, keypoints
+    valid_extensions = ('.jpg', '.jpeg', '.png', '.tiff', '.bmp')
+    file_count = 0
+    for subdir, dirs, files in os.walk(folder):
+        for file in files:
+            if file.lower().endswith(valid_extensions):
+                img_path = os.path.join(subdir, file)
+                img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+                if img is not None:
+                    img = cv2.resize(img, (128, 128))
+                    images.append(img)
+                    labels.append(label)
+                    file_count += 1
 
-# Load datasets
-def load_datasets(base_path):
-    # Load 'bad' serves (class 0)
-    bad_directory = os.path.join(base_path, 'Baddataset')
-    bad_images, bad_labels, bad_keypoints = [], [], []
-    for i in range(0, 5):  # Adjust if you have different numbers
-        directory = os.path.join(bad_directory, f'WA0{i}_pose_output')
-        images, labels, keypoints = load_images_and_keypoints(directory, 0)
-        bad_images.extend(images)
-        bad_labels.extend(labels)
-        bad_keypoints.extend(keypoints)
+                    if augment:
+                        augmented_images = augment_image(img)
+                        images.extend(augmented_images)
+                        labels.extend([label] * len(augmented_images))
+    print(f"Loaded {file_count} images from {folder}", flush=True)
+    return np.array(images), np.array(labels)
 
-    # Load 'good' serves (class 1)
-    good_train_directory = os.path.join(base_path, 'train_pose_output')
-    good_valid_directory = os.path.join(base_path, 'valid_pose_output')
-    good_images_train, good_labels_train, good_keypoints_train = load_images_and_keypoints(good_train_directory, 1)
-    good_images_valid, good_labels_valid, good_keypoints_valid = load_images_and_keypoints(good_valid_directory, 1)
+# Image augementation
+def augment_image(img):
+    rows, cols, _ = img.shape
+    augmented_images = []
+    # Add rotation
+    for angle in [10, -10, 20, -20]:
+        M = cv2.getRotationMatrix2D((cols / 2, rows / 2), angle, 1)
+        img_rotated = cv2.warpAffine(img, M, (cols, rows))
+        augmented_images.append(img_rotated)
+    # Adjust bright
+    img_brighter = cv2.convertScaleAbs(img, alpha=1.3, beta=40)
+    img_darker = cv2.convertScaleAbs(img, alpha=0.7, beta=-40)
+    # Add noise
+    noise = np.random.randint(0, 50, img.shape, dtype='uint8')
+    img_noisy = cv2.add(img, noise)
+    augmented_images.extend([img_brighter, img_darker, img_noisy])
+    return augmented_images
 
-    # Combine all images, labels, and keypoints for training
-    images = np.array(bad_images + good_images_train + good_images_valid)
-    labels = np.array(bad_labels + good_labels_train + good_labels_valid)
-    keypoints = np.array(bad_keypoints + good_keypoints_train + good_keypoints_valid)
+# Load images from each folder
+good_images, good_labels = load_images_from_folder(train_good_dir, 'good')
+bad_images, bad_labels = load_images_from_folder(train_bad_dir, 'bad', augment=True)
 
-    return images, labels, keypoints
+# Set the num of 'bad' images evenly with 'good' images (Random sampling)
+if len(bad_images) > len(good_images):
+    indices = np.random.choice(len(bad_images), size=len(good_images), replace=False)
+    bad_images = bad_images[indices]
+    bad_labels = bad_labels[indices]
 
-# Load test datasets
-def load_test_datasets(base_path):
-    test_directory = os.path.join(base_path, 'test_pose_output')
-    test_images, test_labels, test_keypoints = load_images_and_keypoints(test_directory, 1)  # Label 1 for 'good'
-    # You might want to add logic for 'bad' test cases if available in the structure
+# Check data
+print(f"Number of good images: {len(good_images)}", flush=True)
+print(f"Number of bad images (balanced): {len(bad_images)}", flush=True)
 
-    return np.array(test_images), np.array(test_labels), np.array(test_keypoints)
+# Merge data
+X = np.concatenate([good_images, bad_images])
+y = np.concatenate([good_labels, bad_labels])
+print(f"Total number of images: {len(X)}", flush=True)
 
-# Load the training dataset
-images, labels, keypoints = load_datasets(base_path)
+# Encode labels
+le = LabelEncoder()
+y = le.fit_transform(y)
 
-# Prepare features for training
-X_train = prepare_features(images, keypoints)
-y_train = labels
+# Split dataset (80% train, 20% test)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# Load the test dataset
-test_images, test_labels, test_keypoints = load_test_datasets(base_path)
+# Initialise model
+model = RandomForestClassifier(
+    n_estimators=100,
+    max_depth=5,               # Decrease to reduce overfitting
+    min_samples_split=20,      # Increase to reduce overfitting
+    min_samples_leaf=10,       # Increase to reduce overfitting
+    class_weight='balanced',
+    random_state=42
+)
 
-# Prepare features for testing
-X_test = prepare_features(test_images, test_keypoints)
-y_test = test_labels
+# Flattened the data
+X_train_flat = X_train.reshape(len(X_train), -1)
+X_test_flat = X_test.reshape(len(X_test), -1)
+print("Training model...", flush=True)
+model.fit(X_train_flat, y_train)
+print("Model training complete", flush=True)
 
-# Train the Random Forest model
-rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
-rf_model.fit(X_train, y_train)
+# Cross validation
+cv_scores = cross_val_score(model, X_train_flat, y_train, cv=5)
+plt.figure(figsize=(10, 5))
+plt.plot(range(1, 6), cv_scores, marker='o', linestyle='-')
+plt.title("Cross-Validation Accuracy Scores")
+plt.xlabel("Fold")
+plt.ylabel("Accuracy")
+plt.ylim(0.8, 1.0) 
+plt.show()
+print("Cross-Validation Accuracy Scores:", cv_scores, flush=True)
+print("Mean CV Accuracy:", np.mean(cv_scores), flush=True)
 
-# Make predictions on the test set
-y_pred = rf_model.predict(X_test)
+y_pred = model.predict(X_test_flat)
+conf_matrix = confusion_matrix(y_test, y_pred)
 
-# Evaluate the model
-accuracy = accuracy_score(y_test, y_pred)
-print(f"Model accuracy: {accuracy:.2f}")
+plt.figure(figsize=(8, 6))
+sns.heatmap(conf_matrix, annot=True, fmt="d", cmap="Blues", xticklabels=le.classes_, yticklabels=le.classes_)
+plt.title("Confusion Matrix")
+plt.xlabel("Predicted Label")
+plt.ylabel("True Label")
+plt.show()
+
+print("Accuracy:", accuracy_score(y_test, y_pred))
+print("Precision:", precision_score(y_test, y_pred))
+print("Recall:", recall_score(y_test, y_pred))
+print("F1 Score:", f1_score(y_test, y_pred))
